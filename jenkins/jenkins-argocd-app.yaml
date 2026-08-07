@@ -14,7 +14,8 @@ spec:
     helm:
       values: |
         controller:
-          tag: "lts"
+          image:
+            tag: "lts"
           serviceType: "ClusterIP"
           installPlugins:
             - "kubernetes:4293.v7322d25f750b_"
