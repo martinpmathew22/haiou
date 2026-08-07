@@ -1,2 +1,2 @@
 # haiou
-argo cd experimentation
+argo cd
