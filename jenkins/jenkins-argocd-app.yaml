@@ -10,13 +10,16 @@ spec:
   source:
     repoURL: 'https://charts.jenkins.io'
     chart: jenkins
-    targetRevision: 5.9.53 # Check for latest version
+    targetRevision: 5.9.53
     helm:
       values: |
         controller:
+          componentName: "jenkins-controller"
           image:
+            repository: "jenkins/jenkins"
             tag: "lts"
           serviceType: "ClusterIP"
+          servicePort: 8080
           installPlugins:
             - "kubernetes:4293.v7322d25f750b_"
             - "workflow-aggregator:596.v8c21c963d92d"
