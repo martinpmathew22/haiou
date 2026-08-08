@@ -1,4 +1,4 @@
-# 1. Istio Base CRDs
+# 1. Istio Base CRDs (Sync Wave 1)
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -21,8 +21,10 @@ spec:
       selfHeal: true
     syncOptions:
     - CreateNamespace=true
+    - ServerSideApply=true
+    - SkipDryRunOnMissingResource=true
 ---
-# 2. Istiod (Control Plane)
+# 2. Istiod Control Plane (Sync Wave 2)
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -43,8 +45,11 @@ spec:
     automated:
       prune: true
       selfHeal: true
+    syncOptions:
+    - CreateNamespace=true
+    - ServerSideApply=true
 ---
-# 3. Istio Ingress Gateway
+# 3. Istio Ingress Gateway (Sync Wave 3)
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -67,36 +72,9 @@ spec:
       selfHeal: true
     syncOptions:
     - CreateNamespace=true
+    - ServerSideApply=true
 ---
-# 1. Kiali Application
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: kiali-server
-  namespace: argocd
-  annotations:
-    argocd.argoproj.io/sync-wave: "4"
-spec:
-  project: default
-  source:
-    repoURL: 'https://kiali.org/helm-charts'
-    chart: kiali-server
-    targetRevision: 2.26.0 # Matches image version v2.26
-    helm:
-      values: |
-        image:
-          repo: quay.io/kiali/kiali
-          tag: v2.26
-  destination:
-    server: 'https://kubernetes.default.svc'
-    namespace: istio-system
-  syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
-    syncOptions:
-    - CreateNamespace=true
----
+# 4. Prometheus Application (Sync Wave 3)
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -119,3 +97,34 @@ spec:
       selfHeal: true
     syncOptions:
     - CreateNamespace=true
+    - ServerSideApply=true
+---
+# 5. Kiali Server (Sync Wave 4)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kiali-server
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  project: default
+  source:
+    repoURL: 'https://kiali.org/helm-charts'
+    chart: kiali-server
+    targetRevision: 2.26.0
+    helm:
+      values: |
+        image:
+          repo: quay.io/kiali/kiali
+          tag: v2.26
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: istio-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=true
+    - ServerSideApply=true
