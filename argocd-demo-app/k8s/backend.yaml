@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: backend
-        image: ghcr.io/<your-username>/backend:v1.0.0
+        image: martinpmathew7/backend:v1.0.0
         ports:
         - containerPort: 8080
         livenessProbe:
