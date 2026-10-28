@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ArgoCD Demo</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f4f6f8; }
+    .card { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 420px; width: 100%; text-align: center; }
+    h1 { color: #0284c7; margin-bottom: 1rem; }
+    .status { margin-top: 1.5rem; text-align: left; background: #f8fafc; padding: 1rem; border-radius: 6px; border: 1px solid #e2e8f0; font-family: monospace; font-size: 0.9rem; }
+    button { background: #0284c7; color: white; border: none; padding: 0.6rem 1.2rem; border-radius: 4px; cursor: pointer; font-size: 0.95rem; }
+    button:hover { background: #0369a1; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>ArgoCD Demo App</h1>
+    <button onclick="fetchData()">Fetch Backend Info</button>
+    <div id="output" class="status">Click button to fetch...</div>
+  </div>
+
+  <script>
+    async function fetchData() {
+      const output = document.getElementById('output');
+      output.innerText = 'Calling backend...';
+      try {
+        const res = await fetch('/api/data');
+        const data = await res.json();
+        output.innerHTML = `<strong>Status:</strong> ${data.message}<br><strong>Version:</strong> ${data.version}<br><strong>Pod:</strong> ${data.host}`;
+      } catch (err) {
+        output.innerText = 'Error connecting to backend.';
+      }
+    }
+  </script>
+</body>
+</html>
