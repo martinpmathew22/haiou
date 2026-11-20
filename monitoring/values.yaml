@@ -1,5 +1,5 @@
 grafana:
-  adminPassword: "ChangeMeToASecurePassword!"
+  adminPassword: "Password!"
   persistence:
     enabled: true
     size: 5Gi
