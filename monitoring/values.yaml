@@ -1,13 +1,30 @@
 grafana:
-  adminPassword: "martin"
+  adminPassword: "ChangeMeToASecurePassword!"
   persistence:
     enabled: true
     size: 5Gi
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
 
 prometheus:
   prometheusSpec:
-    retention: 15d
+    retention: 3d
+    retentionSize: 3GB
+    scrapeInterval: 60s
+    evaluationInterval: 60s
     serviceMonitorSelectorNilUsesHelmValues: false
+    resources:
+      requests:
+        cpu: 150m
+        memory: 512Mi
+      limits:
+        cpu: 500m
+        memory: 900Mi
     storageSpec:
       volumeClaimTemplate:
         spec:
@@ -15,3 +32,33 @@ prometheus:
           resources:
             requests:
               storage: 10Gi
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+alertmanager:
+  enabled: false # Enable only if you actively route alerts
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 48Mi
+    limits:
+      cpu: 100m
+      memory: 96Mi
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 24Mi
+    limits:
+      cpu: 100m
+      memory: 48Mi
