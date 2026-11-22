@@ -9,6 +9,9 @@ import (
 	"os"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
 )
@@ -25,6 +28,22 @@ var (
 	// mu       sync.Mutex
 	writer *kafka.Writer
 	rdb    *redis.Client
+
+	eventsPublished = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "demo_kafka_events_published_total",
+		Help: "Total number of events published to Kafka",
+	})
+
+	eventsConsumed = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "demo_kafka_events_consumed_total",
+		Help: "Total number of events consumed from Kafka by pod and partition",
+	}, []string{"pod", "partition"})
+
+	publishDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "demo_kafka_publish_duration_seconds",
+		Help:    "Latency of publishing messages to Kafka",
+		Buckets: prometheus.DefBuckets,
+	})
 )
 
 type KafkaStatusResponse struct {
@@ -103,6 +122,9 @@ func startConsumer(hostname string) {
 		// }
 		// mu.Unlock()
 
+		// Increment consumed counter with pod and partition labels
+		eventsConsumed.WithLabelValues(hostname, fmt.Sprintf("%d", msg.Partition)).Inc()
+
 		entry := fmt.Sprintf("[P%d | %s] %s", msg.Partition, hostname, string(msg.Value))
 		rdb.LPush(ctx, redisKey, entry)
 		rdb.LTrim(ctx, redisKey, 0, 20) // Keep only the last 20 messages
@@ -117,6 +139,7 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	start := time.Now()
 	var payload struct {
 		Text string `json:"text"`
 	}
@@ -135,6 +158,10 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to publish to kafka: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Record metrics
+	eventsPublished.Inc()
+	publishDuration.Observe(time.Since(start).Seconds())
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "Published", "event": payload.Text})
@@ -158,6 +185,9 @@ func main() {
 	http.HandleFunc("/api/data", enableCORS(apiHandler))
 	http.HandleFunc("/api/publish", enableCORS(publishHandler))
 	http.HandleFunc("/healthz", healthHandler)
+
+	// Expose Prometheus metrics (includes Go runtime goroutines, memory, GC + custom metrics)
+	http.Handle("/metrics", promhttp.Handler())
 
 	log.Println("Backend server listening on :8080")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
