@@ -142,6 +142,7 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	hostname, _ := os.Hostname()
+	rdb = redis.NewClient(&redis.Options{Addr: redisAddr})
 
 	writer = &kafka.Writer{
 		Addr:                   kafka.TCP(kafkaBroker),
