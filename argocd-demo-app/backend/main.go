@@ -7,21 +7,24 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"sync"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
 )
 
 const (
 	kafkaBroker = "kafka-service:9092"
+	redisAddr   = "redis-service:6379"
 	topicName   = "demo-events"
+	redisKey    = "consumed_events"
 )
 
 var (
-	messages []string
-	mu       sync.Mutex
-	writer   *kafka.Writer
+	// messages []string
+	// mu       sync.Mutex
+	writer *kafka.Writer
+	rdb    *redis.Client
 )
 
 type KafkaStatusResponse struct {
@@ -52,9 +55,10 @@ func enableCORS(next http.HandlerFunc) http.HandlerFunc {
 
 func apiHandler(w http.ResponseWriter, r *http.Request) {
 	hostname, _ := os.Hostname()
-	mu.Lock()
-	recent := append([]string(nil), messages...) // Create a copy of the messages slice
-	mu.Unlock()
+	recent, _ := rdb.LRange(r.Context(), redisKey, 0, 20).Result()
+	// mu.Lock()
+	// recent := append([]string(nil), messages...) // Create a copy of the messages slice
+	// mu.Unlock()
 
 	resp := KafkaStatusResponse{
 		Message:        "Hello from Go + Kafka via ArgoCD!",
@@ -72,29 +76,37 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("ok"))
 }
 
-func startConsumer() {
+func startConsumer(hostname string) {
 	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers: []string{kafkaBroker},
-		Topic:   topicName,
-		GroupID: "demo-consumer-group",
+		Brokers:     []string{kafkaBroker},
+		Topic:       topicName,
+		GroupID:     "demo-consumer-group",
+		StartOffset: kafka.FirstOffset,
+		MaxWait:     500 * time.Millisecond,
 	})
 
 	defer reader.Close()
 
+	ctx := context.Background()
 	for {
-		msg, err := reader.ReadMessage(context.Background())
+		msg, err := reader.ReadMessage(ctx)
 		if err != nil {
 			log.Printf("Kafka read waiting/retrying: %v", err)
 			time.Sleep(3 * time.Second) // Wait before retrying
 			continue
 		}
 
-		mu.Lock()
-		messages = append(messages, string(msg.Value))
-		if len(messages) > 10 {
-			messages = messages[1:] // Keep only the last 10 messages
-		}
-		mu.Unlock()
+		// mu.Lock()
+		// messages = append(messages, string(msg.Value))
+		// if len(messages) > 10 {
+		// 	messages = messages[1:] // Keep only the last 10 messages
+		// }
+		// mu.Unlock()
+
+		entry := fmt.Sprintf("[P%d | %s] %s", msg.Partition, hostname, string(msg.Value))
+		rdb.LPush(ctx, redisKey, entry)
+		rdb.LTrim(ctx, redisKey, 0, 20) // Keep only the last 20 messages
+		log.Printf("Consumed: %s", entry)
 		log.Printf("Consumed from Kafka: %s", string(msg.Value))
 	}
 }
@@ -114,7 +126,7 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err := writer.WriteMessages(r.Context(), kafka.Message{
-		Key:   []byte("demo-key"),
+		// Key:   []byte("demo-key"),
 		Value: []byte(payload.Text),
 	})
 
@@ -129,14 +141,18 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	hostname, _ := os.Hostname()
+
 	writer = &kafka.Writer{
 		Addr:                   kafka.TCP(kafkaBroker),
 		Topic:                  topicName,
+		Balancer:               &kafka.RoundRobin{},
 		AllowAutoTopicCreation: true,
+		BatchTimeout:           10 * time.Millisecond,
 	}
 	defer writer.Close()
 
-	go startConsumer()
+	go startConsumer(hostname)
 
 	http.HandleFunc("/api/data", enableCORS(apiHandler))
 	http.HandleFunc("/api/publish", enableCORS(publishHandler))
