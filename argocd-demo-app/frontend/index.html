@@ -1,32 +1,25 @@
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8">
-    <title>ArgoCD + Kafka</title>
-    <style>
-      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f4f6f8; }
-      .card { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 420px; width: 100%; text-align: center; }
-      h1 { color: #0284c7; margin-bottom: 1rem; }
-      .status { margin-top: 1.5rem; text-align: left; background: #f8fafc; padding: 1rem; border-radius: 6px; border: 1px solid #e2e8f0; font-family: monospace; font-size: 0.9rem; }
-      button { background: #0284c7; color: white; border: none; padding: 0.6rem 1.2rem; border-radius: 4px; cursor: pointer; font-size: 0.95rem; }
-      button:hover { background: #0369a1; }
-    </style>
-  </head>
-  <body>
-    <div class="card">
-      <h1>ArgoCD + Kafka</h1>
-      <div id="user-info" class="user-bar">Authenticating...</div>
-      <div class="actions">
-        <button class="secondary" onclick="publishEvent()">1. Publish Kafka Event</button>
-        <button onclick="fetchData()">2. Fetch Consumed Events</button>
-        <button class="logout" onclick="keycloak.logout()">Logout</button>
-      </div>
-      <div id="output" class="status">Publish an event, then fetch to see it consumed...</div>
-      <div id="output" class="status">Waiting for login...</div>
+<div class="card">
+    <h1>ArgoCD + Kafka + Keycloak</h1>
+    <div id="user-info" class="user-bar">Authenticating...</div>
+    <div class="actions">
+      <button id="btn-publish" class="secondary" onclick="publishEvent()" disabled>1. Publish Event</button>
+      <button id="btn-fetch" onclick="fetchData()" disabled>2. Fetch Events</button>
+      <button id="btn-logout" class="logout" onclick="logout()" disabled>Logout</button>
     </div>
+    <div id="output" class="status">Waiting for login...</div>
+  </div>
 
-    <script>
-      const keycloak = new Keycloak({
+  <script>
+    let keycloak = null;
+
+    function initApp() {
+      if (typeof Keycloak === 'undefined') {
+        document.getElementById('output').innerText =
+          'Error: keycloak.js failed to load from http://keycloak.local:8080/js/keycloak.js. Check Network tab.';
+        return;
+      }
+
+      keycloak = new Keycloak({
         url: 'http://keycloak.local:8080',
         realm: 'argocd-demo',
         clientId: 'demo-frontend'
@@ -38,56 +31,67 @@
             document.getElementById('user-info').innerText =
               `Logged in as: ${keycloak.tokenParsed.preferred_username}`;
             document.getElementById('output').innerText = 'Authenticated! Ready to publish or fetch.';
+            document.getElementById('btn-publish').disabled = false;
+            document.getElementById('btn-fetch').disabled = false;
+            document.getElementById('btn-logout').disabled = false;
           }
         })
         .catch(err => {
-          document.getElementById('output').innerText = 'Keycloak init failed: ' + err;
+          document.getElementById('output').innerText = 'Keycloak init failed: ' + JSON.stringify(err);
         });
+    }
 
-      async function authFetch(url, options = {}) {
-        await keycloak.updateToken(30); // Auto-refresh token if expiring within 30s
-        options.headers = {
-          ...options.headers,
-          'Authorization': 'Bearer ' + keycloak.token
-        };
-        return fetch(url, options);
+    function logout() {
+      if (keycloak) keycloak.logout();
+    }
+
+    async function authFetch(url, options = {}) {
+      if (!keycloak || !keycloak.authenticated) {
+        throw new Error('Not authenticated yet');
       }
-            
-      async function publishEvent() {
-        const output = document.getElementById('output');
+      await keycloak.updateToken(30);
+      options.headers = {
+        ...options.headers,
+        'Authorization': 'Bearer ' + keycloak.token
+      };
+      return fetch(url, options);
+    }
+
+    async function publishEvent() {
+      const output = document.getElementById('output');
+      try {
         const text = `Message #${Math.floor(Math.random() * 1000)}`;
         const res = await authFetch('/api/publish', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text })
         });
-
         if (!res.ok) {
           output.innerText = `Error ${res.status}: ${await res.text()}`;
           return;
         }
-
         const data = await res.json();
-        output.innerText = `Published to Kafka: "${data.event}"`;
+        output.innerText = `Published: "${data.event}"`;
+      } catch (err) {
+        output.innerText = err.message;
       }
+    }
 
-      async function fetchData() {
-        const output = document.getElementById('output');
-        output.innerText = 'Calling backend...';
-        try {
-          const res = await authFetch('/api/data');
-          if (!res.ok) {
-            output.innerText = `Error ${res.status}: ${await res.text()}`;
-            return;
-          }
-          const data = await res.json();
-          const events = (data.recent_messages || []).map(m => `• ${m}`).join('<br>') || 'No messages yet';
-          output.innerHTML = `<strong>Pod:</strong> ${data.host}<br><strong>Consumed Kafka Events:</strong><br>${events}`;
-          // output.innerHTML = `<strong>Status:</strong> ${data.message}<br><strong>Version:</strong> ${data.version}<br><strong>Pod:</strong> ${data.host}`;
-        } catch (err) {
-          output.innerText = 'Error connecting to backend.';
+    async function fetchData() {
+      const output = document.getElementById('output');
+      try {
+        const res = await authFetch('/api/data');
+        if (!res.ok) {
+          output.innerText = `Error ${res.status}: ${await res.text()}`;
+          return;
         }
+        const data = await res.json();
+        const events = (data.recent_messages || []).map(m => `• ${m}`).join('<br>') || 'No messages yet';
+        output.innerHTML = `<strong>User:</strong> ${data.user}<br><strong>Pod:</strong> ${data.host}<br><strong>Events:</strong><br>${events}`;
+      } catch (err) {
+        output.innerText = err.message;
       }
-    </script>
-  </body>
-</html>
+    }
+
+    window.addEventListener('DOMContentLoaded', initApp);
+  </script>
