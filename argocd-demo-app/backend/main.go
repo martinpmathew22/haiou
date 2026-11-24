@@ -7,8 +7,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -26,8 +28,9 @@ const (
 var (
 	// messages []string
 	// mu       sync.Mutex
-	writer *kafka.Writer
-	rdb    *redis.Client
+	writer   *kafka.Writer
+	rdb      *redis.Client
+	verifier *oidc.IDTokenVerifier
 
 	eventsPublished = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "demo_kafka_events_published_total",
@@ -50,6 +53,7 @@ type KafkaStatusResponse struct {
 	Message        string   `json:"message"`
 	Version        string   `json:"version"`
 	Host           string   `json:"host"`
+	User           string   `json:"user"`
 	RecentMessages []string `json:"recent_messages"`
 }
 
@@ -57,6 +61,33 @@ type StatusResponse struct {
 	Message string `json:"message"`
 	Version string `json:"version"`
 	Host    string `json:"host"`
+}
+
+// authMiddleware validates the Bearer token issued by Keycloak
+func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			http.Error(w, "Missing or invalid Authorization header", http.StatusUnauthorized)
+			return
+		}
+
+		rawToken := strings.TrimPrefix(authHeader, "Bearer ")
+		token, err := verifier.Verify(r.Context(), rawToken)
+		if err != nil {
+			http.Error(w, "Invalid token: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		var claims struct {
+			PreferredUsername string `json:"preferred_username"`
+		}
+
+		_ = token.Claims(&claims)
+		r.Header.Set("X-Authenticated-User", claims.PreferredUsername)
+
+		next(w, r)
+	}
 }
 
 func enableCORS(next http.HandlerFunc) http.HandlerFunc {
@@ -169,6 +200,16 @@ func publishHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	hostname, _ := os.Hostname()
+
+	issuerURL := os.Getenv("KEYCLOAK_ISSUER_URL") // e.g. http://192.168.0.5:8080/realms/argocd-demo
+	provider, err := oidc.NewProvider(context.Background(), issuerURL)
+	if err != nil {
+		log.Fatalf("Failed to connect to Keycloak OIDC provider (%s): %v", issuerURL, err)
+	}
+
+	// SkipClientIDCheck allows verifying Keycloak access tokens whose 'aud' is "account"
+	verifier = provider.Verifier(&oidc.Config{SkipClientIDCheck: true})
+
 	rdb = redis.NewClient(&redis.Options{Addr: redisAddr})
 
 	writer = &kafka.Writer{
@@ -182,8 +223,8 @@ func main() {
 
 	go startConsumer(hostname)
 
-	http.HandleFunc("/api/data", enableCORS(apiHandler))
-	http.HandleFunc("/api/publish", enableCORS(publishHandler))
+	http.HandleFunc("/api/data", authMiddleware(apiHandler))
+	http.HandleFunc("/api/publish", authMiddleware(publishHandler))
 	http.HandleFunc("/healthz", healthHandler)
 
 	// Expose Prometheus metrics (includes Go runtime goroutines, memory, GC + custom metrics)

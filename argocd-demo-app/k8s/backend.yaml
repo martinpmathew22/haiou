@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: backend
-        image: martinpmathew7/backend:v3.0.2
+        image: harbor.local/tang/backend:v1.0.0
         ports:
         - containerPort: 8080
         livenessProbe:
@@ -25,6 +25,9 @@ spec:
             port: 8080
           initialDelaySeconds: 3
           periodSeconds: 5
+        env:
+        - name: KEYCLOAK_ISSUER_URL
+          value: "http://keycloak.local:8080/realms/argocd-demo"          
 ---
 apiVersion: v1
 kind: Service

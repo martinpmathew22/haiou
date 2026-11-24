@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: frontend
-        image: martinpmathew7/frontend:v3.0.0
+        image: harbor.local/tang/frontend:v1.0.0
         ports:
         - containerPort: 80
 ---
