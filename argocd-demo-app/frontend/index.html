@@ -2,54 +2,23 @@
     <h1>ArgoCD + Kafka + Keycloak</h1>
     <div id="user-info" class="user-bar">Authenticating...</div>
     <div class="actions">
-      <button id="btn-publish" class="secondary" onclick="publishEvent()" disabled>1. Publish Event</button>
-      <button id="btn-fetch" onclick="fetchData()" disabled>2. Fetch Events</button>
-      <button id="btn-logout" class="logout" onclick="logout()" disabled>Logout</button>
+      <button id="btn-publish" class="secondary" disabled>1. Publish Event</button>
+      <button id="btn-fetch" disabled>2. Fetch Events</button>
+      <button id="btn-logout" class="logout" disabled>Logout</button>
     </div>
     <div id="output" class="status">Waiting for login...</div>
   </div>
 
   <script type="module">
     import Keycloak from '/keycloak.js';
-    let keycloak = null;
 
-    function initApp() {
-      if (typeof Keycloak === 'undefined') {
-        document.getElementById('output').innerText =
-          'Error: keycloak.js failed to load from http://keycloak.local:8080/js/keycloak.js. Check Network tab.';
-        return;
-      }
-
-      keycloak = new Keycloak({
-        url: 'http://keycloak.local:8080',
-        realm: 'argocd-demo',
-        clientId: 'demo-frontend'
-      });
-
-      keycloak.init({ onLoad: 'login-required', checkLoginIframe: false })
-        .then(authenticated => {
-          if (authenticated) {
-            document.getElementById('user-info').innerText =
-              `Logged in as: ${keycloak.tokenParsed.preferred_username}`;
-            document.getElementById('output').innerText = 'Authenticated! Ready to publish or fetch.';
-            document.getElementById('btn-publish').disabled = false;
-            document.getElementById('btn-fetch').disabled = false;
-            document.getElementById('btn-logout').disabled = false;
-          }
-        })
-        .catch(err => {
-          document.getElementById('output').innerText = 'Keycloak init failed: ' + JSON.stringify(err);
-        });
-    }
-
-    function logout() {
-      if (keycloak) keycloak.logout();
-    }
+    const keycloak = new Keycloak({
+      url: 'http://keycloak.local:8080',
+      realm: 'argocd-demo',
+      clientId: 'demo-frontend'
+    });
 
     async function authFetch(url, options = {}) {
-      if (!keycloak || !keycloak.authenticated) {
-        throw new Error('Not authenticated yet');
-      }
       await keycloak.updateToken(30);
       options.headers = {
         ...options.headers,
@@ -94,5 +63,22 @@
       }
     }
 
-    window.addEventListener('DOMContentLoaded', initApp);
+    document.getElementById('btn-publish').addEventListener('click', publishEvent);
+    document.getElementById('btn-fetch').addEventListener('click', fetchData);
+    document.getElementById('btn-logout').addEventListener('click', () => keycloak.logout());
+
+    keycloak.init({ onLoad: 'login-required', checkLoginIframe: false })
+      .then(authenticated => {
+        if (authenticated) {
+          document.getElementById('user-info').innerText =
+            `Logged in as: ${keycloak.tokenParsed.preferred_username}`;
+          document.getElementById('output').innerText = 'Authenticated! Ready to publish or fetch.';
+          document.getElementById('btn-publish').disabled = false;
+          document.getElementById('btn-fetch').disabled = false;
+          document.getElementById('btn-logout').disabled = false;
+        }
+      })
+      .catch(err => {
+        document.getElementById('output').innerText = 'Keycloak init failed: ' + JSON.stringify(err);
+      });
   </script>
