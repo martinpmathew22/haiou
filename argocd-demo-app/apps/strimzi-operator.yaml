@@ -16,7 +16,25 @@ spec:
     helm:
       releaseName: strimzi-cluster-operator
       valuesObject:
-        watchAnyNamespace: true
+        watchNamespaces:
+          - messaging
+        resources:
+          requests:
+            memory: 384Mi
+            cpu: 200m
+          limits:
+            memory: 768Mi
+            cpu: 1000m
+        livenessProbe:
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 5
+        readinessProbe:
+          initialDelaySeconds: 45
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 5
   destination:
     server: https://kubernetes.default.svc
     namespace: kafka
