@@ -18,20 +18,29 @@ spec:
       valuesObject:
         watchNamespaces:
           - messaging
+        nodeSelector:
+          kubernetes.io/hostname: ubuntu-yuksum
+        env:
+          - name: KUBERNETES_HTTP2_DISABLE
+            value: "true"
+          - name: KUBERNETES_REQUEST_TIMEOUT
+            value: "30000"
+          - name: KUBERNETES_CONNECTION_TIMEOUT
+            value: "30000"
         resources:
           requests:
-            memory: 384Mi
+            memory: 512Mi
             cpu: 200m
           limits:
-            memory: 768Mi
+            memory: 1Gi
             cpu: 1000m
         livenessProbe:
-          initialDelaySeconds: 60
+          initialDelaySeconds: 90
           periodSeconds: 30
           timeoutSeconds: 10
           failureThreshold: 5
         readinessProbe:
-          initialDelaySeconds: 45
+          initialDelaySeconds: 60
           periodSeconds: 30
           timeoutSeconds: 10
           failureThreshold: 5
