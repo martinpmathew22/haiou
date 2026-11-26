@@ -10,7 +10,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/your-username/your-repo.git
+    repoURL: https://github.com/martinpmathew22/haiou.git
     targetRevision: HEAD
     path: k8s/messaging
   destination:
