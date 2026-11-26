@@ -18,220 +18,307 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
-const (
-	kafkaBroker = "kafka-service:9092"
-	redisAddr   = "redis-service:6379"
-	topicName   = "demo-events"
-	redisKey    = "consumed_events"
-)
+type contextKey string
+
+const userContextKey contextKey = "user"
+
+type Config struct {
+	Port              string
+	KeycloakIssuerURL string
+	KafkaBroker       string
+	KafkaTopic        string
+	RedisAddr         string
+}
+
+type App struct {
+	verifier     *oidc.IDTokenVerifier
+	rdb          *redis.Client
+	kafkaWriter  *kafka.Writer
+	rabbitClient *RabbitClient
+}
 
 var (
-	// messages []string
-	// mu       sync.Mutex
-	writer   *kafka.Writer
-	rdb      *redis.Client
-	verifier *oidc.IDTokenVerifier
+	eventsPublished = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "app_events_published_total",
+			Help: "Total number of events published by broker",
+		},
+		[]string{"broker"},
+	)
 
-	eventsPublished = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "demo_kafka_events_published_total",
-		Help: "Total number of events published to Kafka",
-	})
-
-	eventsConsumed = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "demo_kafka_events_consumed_total",
-		Help: "Total number of events consumed from Kafka by pod and partition",
-	}, []string{"pod", "partition"})
-
-	publishDuration = promauto.NewHistogram(prometheus.HistogramOpts{
-		Name:    "demo_kafka_publish_duration_seconds",
-		Help:    "Latency of publishing messages to Kafka",
-		Buckets: prometheus.DefBuckets,
-	})
+	eventsConsumed = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "app_events_consumed_total",
+			Help: "Total number of events consumed by broker",
+		},
+		[]string{"broker"},
+	)
 )
 
-type KafkaStatusResponse struct {
-	Message        string   `json:"message"`
-	Version        string   `json:"version"`
-	Host           string   `json:"host"`
-	User           string   `json:"user"`
-	RecentMessages []string `json:"recent_messages"`
+func getEnv(key, fallback string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return fallback
 }
 
-type StatusResponse struct {
-	Message string `json:"message"`
-	Version string `json:"version"`
-	Host    string `json:"host"`
+func loadConfig() Config {
+	return Config{
+		Port:              getEnv("PORT", "8080"),
+		KeycloakIssuerURL: getEnv("KEYCLOAK_ISSUER_URL", "http://keycloak.local:8080/realms/argocd-demo"),
+		KafkaBroker:       getEnv("KAFKA_BROKER", "my-cluster-kafka-bootstrap:9092"),
+		KafkaTopic:        getEnv("KAFKA_TOPIC", "demo-events"),
+		RedisAddr:         getEnv("REDIS_ADDR", "redis-service:6379"),
+	}
 }
 
-// authMiddleware validates the Bearer token issued by Keycloak
-func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func initOIDCVerifier(ctx context.Context, issuerURL string, maxAttempts int, delay time.Duration) (*oidc.IDTokenVerifier, error) {
+	var provider *oidc.Provider
+	var err error
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		provider, err = oidc.NewProvider(ctx, issuerURL)
+		if err == nil {
+			log.Printf("Connected to Keycloak OIDC provider at %s", issuerURL)
+			return provider.Verifier(&oidc.Config{SkipClientIDCheck: true}), nil
+		}
+		log.Printf("Keycloak OIDC provider not ready (attempt %d/%d): %v", attempt, maxAttempts, err)
+		time.Sleep(delay)
+	}
+
+	return nil, fmt.Errorf("failed to initialize OIDC provider after %d attempts: %w", maxAttempts, err)
+}
+
+func initKafkaWriter(broker, topic string) *kafka.Writer {
+	return &kafka.Writer{
+		Addr:                   kafka.TCP(broker),
+		Topic:                  topic,
+		Balancer:               &kafka.LeastBytes{},
+		AllowAutoTopicCreation: true,
+	}
+}
+
+func connectRabbitWithRetry(maxAttempts int, delay time.Duration) *RabbitClient {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		client, err := NewRabbitClient()
+		if err == nil {
+			log.Printf("Connected to RabbitMQ on attempt %d", attempt)
+			client.StartConsumer()
+			return client
+		}
+		log.Printf("RabbitMQ not ready (attempt %d/%d): %v — retrying in %s", attempt, maxAttempts, err, delay)
+		time.Sleep(delay)
+	}
+
+	log.Println("Warning: proceeding without RabbitMQ after max retry attempts")
+	return nil
+}
+
+func startKafkaConsumer(brokers []string, topic string, rdb *redis.Client) {
+	reader := kafka.NewReader(kafka.ReaderConfig{
+		Brokers:  brokers,
+		Topic:    topic,
+		GroupID:  "backend-consumer-group",
+		MinBytes: 1,
+		MaxBytes: 10e6,
+	})
+
+	go func() {
+		defer reader.Close()
+		for {
+			msg, err := reader.ReadMessage(context.Background())
+			if err != nil {
+				log.Printf("Kafka consumer read error: %v", err)
+				time.Sleep(2 * time.Second)
+				continue
+			}
+
+			val := string(msg.Value)
+			log.Printf("[Kafka Consumer] Received: %s", val)
+			eventsConsumed.WithLabelValues("kafka").Inc()
+
+			saveRecentMessage(rdb, val)
+		}
+	}()
+}
+
+func saveRecentMessage(rdb *redis.Client, msg string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if err := rdb.LPush(ctx, "recent_messages", msg).Err(); err != nil {
+		log.Printf("Redis push error: %v", err)
+		return
+	}
+	rdb.LTrim(ctx, "recent_messages", 0, 9)
+}
+
+func (a *App) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
-		if !strings.HasPrefix(authHeader, "Bearer ") {
+		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
 			http.Error(w, "Missing or invalid Authorization header", http.StatusUnauthorized)
 			return
 		}
 
 		rawToken := strings.TrimPrefix(authHeader, "Bearer ")
-		token, err := verifier.Verify(r.Context(), rawToken)
+		idToken, err := a.verifier.Verify(r.Context(), rawToken)
 		if err != nil {
-			http.Error(w, "Invalid token: "+err.Error(), http.StatusUnauthorized)
+			log.Printf("Token verification failed: %v", err)
+			http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
 			return
 		}
 
 		var claims struct {
 			PreferredUsername string `json:"preferred_username"`
+			Email             string `json:"email"`
 		}
-
-		_ = token.Claims(&claims)
-		r.Header.Set("X-Authenticated-User", claims.PreferredUsername)
-
-		next(w, r)
-	}
-}
-
-func enableCORS(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusOK)
+		if err := idToken.Claims(&claims); err != nil {
+			http.Error(w, "Failed to parse token claims", http.StatusUnauthorized)
 			return
 		}
-		next(w, r)
-	}
+
+		username := claims.PreferredUsername
+		if username == "" {
+			username = claims.Email
+		}
+
+		ctxWithUser := context.WithValue(r.Context(), userContextKey, username)
+		next.ServeHTTP(w, r.WithContext(ctxWithUser))
+	})
 }
 
-func apiHandler(w http.ResponseWriter, r *http.Request) {
-	hostname, _ := os.Hostname()
-	recent, _ := rdb.LRange(r.Context(), redisKey, 0, 20).Result()
-	// mu.Lock()
-	// recent := append([]string(nil), messages...) // Create a copy of the messages slice
-	// mu.Unlock()
-
-	resp := KafkaStatusResponse{
-		Message:        "Hello from Go + Kafka via ArgoCD!",
-		Version:        "v2.0.0",
-		Host:           hostname,
-		RecentMessages: recent,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
-}
-
-func healthHandler(w http.ResponseWriter, r *http.Request) {
+func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("ok"))
 }
 
-func startConsumer(hostname string) {
-	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:     []string{kafkaBroker},
-		Topic:       topicName,
-		GroupID:     "demo-consumer-group",
-		StartOffset: kafka.FirstOffset,
-		MaxWait:     500 * time.Millisecond,
-	})
-
-	defer reader.Close()
-
-	ctx := context.Background()
-	for {
-		msg, err := reader.ReadMessage(ctx)
-		if err != nil {
-			log.Printf("Kafka read waiting/retrying: %v", err)
-			time.Sleep(3 * time.Second) // Wait before retrying
-			continue
-		}
-
-		// mu.Lock()
-		// messages = append(messages, string(msg.Value))
-		// if len(messages) > 10 {
-		// 	messages = messages[1:] // Keep only the last 10 messages
-		// }
-		// mu.Unlock()
-
-		// Increment consumed counter with pod and partition labels
-		eventsConsumed.WithLabelValues(hostname, fmt.Sprintf("%d", msg.Partition)).Inc()
-
-		entry := fmt.Sprintf("[P%d | %s] %s", msg.Partition, hostname, string(msg.Value))
-		rdb.LPush(ctx, redisKey, entry)
-		rdb.LTrim(ctx, redisKey, 0, 20) // Keep only the last 20 messages
-		log.Printf("Consumed: %s", entry)
-		log.Printf("Consumed from Kafka: %s", string(msg.Value))
-	}
-}
-
-func publishHandler(w http.ResponseWriter, r *http.Request) {
+func (a *App) handlePublish(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	start := time.Now()
 	var payload struct {
 		Text string `json:"text"`
 	}
-
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.Text == "" {
-		payload.Text = fmt.Sprintf("Event triggered at %s", time.Now().Format(time.Kitchen))
-	}
-
-	err := writer.WriteMessages(r.Context(), kafka.Message{
-		// Key:   []byte("demo-key"),
-		Value: []byte(payload.Text),
-	})
-
-	if err != nil {
-		log.Printf("Failed to publish message: %v", err)
-		http.Error(w, "Failed to publish to kafka: "+err.Error(), http.StatusInternalServerError)
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || strings.TrimSpace(payload.Text) == "" {
+		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
 		return
 	}
 
-	// Record metrics
-	eventsPublished.Inc()
-	publishDuration.Observe(time.Since(start).Seconds())
+	user, _ := r.Context().Value(userContextKey).(string)
+	enrichedMsg := payload.Text + " (by " + user + ")"
 
+	if err := a.publishToBrokers(r.Context(), enrichedMsg); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, map[string]string{
+		"status": "published",
+		"event":  enrichedMsg,
+	})
+}
+
+func (a *App) publishToBrokers(ctx context.Context, msg string) error {
+	if err := a.kafkaWriter.WriteMessages(ctx, kafka.Message{Value: []byte(msg)}); err != nil {
+		log.Printf("Kafka publish error: %v", err)
+		return fmt.Errorf("failed to publish to Kafka")
+	}
+	eventsPublished.WithLabelValues("kafka").Inc()
+
+	if a.rabbitClient != nil {
+		if err := a.rabbitClient.Publish(ctx, msg); err != nil {
+			log.Printf("RabbitMQ publish error: %v", err)
+			return fmt.Errorf("failed to publish to RabbitMQ")
+		}
+		eventsPublished.WithLabelValues("rabbitmq").Inc()
+		eventsConsumed.WithLabelValues("rabbitmq").Inc()
+	}
+
+	return nil
+}
+
+func (a *App) handleData(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	hostname, _ := os.Hostname()
+	user, _ := r.Context().Value(userContextKey).(string)
+
+	recentMsgs, err := a.rdb.LRange(r.Context(), "recent_messages", 0, 9).Result()
+	if err != nil {
+		log.Printf("Redis read error: %v", err)
+		recentMsgs = []string{}
+	}
+
+	rabbitMsgs := []string{}
+	if a.rabbitClient != nil {
+		rabbitMsgs = a.rabbitClient.GetRecentMessages()
+	}
+
+	writeJSON(w, map[string]any{
+		"user":            user,
+		"host":            hostname,
+		"recent_messages": recentMsgs,
+		"rabbit_messages": rabbitMsgs,
+	})
+}
+
+func writeJSON(w http.ResponseWriter, data any) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "Published", "event": payload.Text})
+	json.NewEncoder(w).Encode(data)
+}
+
+func (a *App) newRouter() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", handleHealthz)
+	mux.Handle("/metrics", promhttp.Handler())
+	mux.Handle("/api/publish", a.authMiddleware(http.HandlerFunc(a.handlePublish)))
+	mux.Handle("/api/data", a.authMiddleware(http.HandlerFunc(a.handleData)))
+	return mux
 }
 
 func main() {
-	hostname, _ := os.Hostname()
+	ctx := context.Background()
+	cfg := loadConfig()
 
-	issuerURL := os.Getenv("KEYCLOAK_ISSUER_URL") // e.g. http://192.168.0.5:8080/realms/argocd-demo
-	provider, err := oidc.NewProvider(context.Background(), issuerURL)
+	verifier, err := initOIDCVerifier(ctx, cfg.KeycloakIssuerURL, 10, 3*time.Second)
 	if err != nil {
-		log.Fatalf("Failed to connect to Keycloak OIDC provider (%s): %v", issuerURL, err)
+		log.Fatal(err)
 	}
 
-	// SkipClientIDCheck allows verifying Keycloak access tokens whose 'aud' is "account"
-	verifier = provider.Verifier(&oidc.Config{SkipClientIDCheck: true})
+	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
+	defer rdb.Close()
 
-	rdb = redis.NewClient(&redis.Options{Addr: redisAddr})
+	kafkaWriter := initKafkaWriter(cfg.KafkaBroker, cfg.KafkaTopic)
+	defer kafkaWriter.Close()
+	startKafkaConsumer([]string{cfg.KafkaBroker}, cfg.KafkaTopic, rdb)
 
-	writer = &kafka.Writer{
-		Addr:                   kafka.TCP(kafkaBroker),
-		Topic:                  topicName,
-		Balancer:               &kafka.RoundRobin{},
-		AllowAutoTopicCreation: true,
-		BatchTimeout:           10 * time.Millisecond,
+	rabbitClient := connectRabbitWithRetry(10, 3*time.Second)
+	if rabbitClient != nil {
+		defer rabbitClient.Close()
 	}
-	defer writer.Close()
 
-	go startConsumer(hostname)
+	app := &App{
+		verifier:     verifier,
+		rdb:          rdb,
+		kafkaWriter:  kafkaWriter,
+		rabbitClient: rabbitClient,
+	}
 
-	http.HandleFunc("/api/data", authMiddleware(apiHandler))
-	http.HandleFunc("/api/publish", authMiddleware(publishHandler))
-	http.HandleFunc("/healthz", healthHandler)
+	server := &http.Server{
+		Addr:         ":" + cfg.Port,
+		Handler:      app.newRouter(),
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
 
-	// Expose Prometheus metrics (includes Go runtime goroutines, memory, GC + custom metrics)
-	http.Handle("/metrics", promhttp.Handler())
-
-	log.Println("Backend server listening on :8080")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
-		log.Fatalf("Server error: %v", err)
+	log.Printf("Backend listening on :%s", cfg.Port)
+	if err := server.ListenAndServe(); err != nil {
+		log.Fatalf("Server failed: %v", err)
 	}
 }

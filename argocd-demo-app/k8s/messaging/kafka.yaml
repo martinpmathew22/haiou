@@ -1,10 +1,10 @@
-apiVersion: apps/v1
-kind: Deployment
-metadata: 
-  name: kafka
+apiVersion: kafka.strimzi.io/v1beta2
+kind: Kafka
+metadata:
+  name: my-cluster
+  namespace: messaging
   labels:
     app: kafka
-spec:
   replicas: 1
   selector:
     matchLabels:

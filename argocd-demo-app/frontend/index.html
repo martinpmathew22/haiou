@@ -57,7 +57,14 @@
         }
         const data = await res.json();
         const events = (data.recent_messages || []).map(m => `• ${m}`).join('<br>') || 'No messages yet';
-        output.innerHTML = `<strong>User:</strong> ${data.user}<br><strong>Pod:</strong> ${data.host}<br><strong>Events:</strong><br>${events}`;
+        const rabbit = (data.rabbit_messages || []).map(m => `• ${m}`).join('<br>') || 'No RabbitMQ messages yet';
+
+        output.innerHTML = `
+          <strong>User:</strong> ${data.user}<br>
+          <strong>Pod:</strong> ${data.host}<br><br>
+          <strong>Kafka / Redis Events:</strong><br>${events}<br><br>
+          <strong>RabbitMQ Events:</strong><br>${rabbit}
+        `;
       } catch (err) {
         output.innerText = err.message;
       }
