@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: backend
-        image: harbor.local/tang/backend:v3.0.0
+        image: harbor.local/tang/backend:v3.0.1
         ports:
         - containerPort: 8080
         livenessProbe:

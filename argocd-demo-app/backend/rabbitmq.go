@@ -8,17 +8,18 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/redis/go-redis/v9"
 )
 
 type RabbitClient struct {
-	conn     *amqp.Connection
-	channel  *amqp.Channel
-	queue    string
-	mu       sync.RWMutex
-	messages []string
+	conn    *amqp.Connection
+	channel *amqp.Channel
+	queue   string
+	mu      sync.RWMutex
+	rdb     *redis.Client
 }
 
-func NewRabbitClient() (*RabbitClient, error) {
+func NewRabbitClient(rdb *redis.Client) (*RabbitClient, error) {
 	url := os.Getenv("RABBITMQ_URL")
 	if url == "" {
 		url = "amqp://guest:guest@rabbitmq-service:5672/"
@@ -49,7 +50,12 @@ func NewRabbitClient() (*RabbitClient, error) {
 		return nil, err
 	}
 
-	return &RabbitClient{conn: conn, channel: ch, queue: q.Name}, nil
+	return &RabbitClient{
+		conn:    conn,
+		channel: ch,
+		queue:   q.Name,
+		rdb:     rdb,
+	}, nil
 }
 
 func (r *RabbitClient) Publish(ctx context.Context, body string) error {
@@ -92,24 +98,19 @@ func (r *RabbitClient) StartConsumer() {
 		for d := range msgs {
 			msg := string(d.Body)
 			log.Printf("[RabbitMQ Consumer] Received: %s", msg)
+			eventsConsumed.WithLabelValues("rabbitmq").Inc()
 
-			r.mu.Lock()
-			r.messages = append([]string{msg}, r.messages...)
-			if len(r.messages) > 10 {
-				r.messages = r.messages[:10]
+			if r.rdb != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				if err := r.rdb.LPush(ctx, "rabbit_messages", msg).Err(); err != nil {
+					log.Printf("Redis push error (rabbit_messages): %v", err)
+				} else {
+					r.rdb.LTrim(ctx, "rabbit_messages", 0, 9)
+				}
+				cancel()
 			}
-			r.mu.Unlock()
 		}
 	}()
-}
-
-func (r *RabbitClient) GetRecentMessages() []string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	result := make([]string, len(r.messages))
-	copy(result, r.messages)
-	return result
 }
 
 func (r *RabbitClient) Close() {

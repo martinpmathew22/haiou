@@ -98,9 +98,9 @@ func initKafkaWriter(broker, topic string) *kafka.Writer {
 	}
 }
 
-func connectRabbitWithRetry(maxAttempts int, delay time.Duration) *RabbitClient {
+func connectRabbitWithRetry(rdb *redis.Client, maxAttempts int, delay time.Duration) *RabbitClient {
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		client, err := NewRabbitClient()
+		client, err := NewRabbitClient(rdb)
 		if err == nil {
 			log.Printf("Connected to RabbitMQ on attempt %d", attempt)
 			client.StartConsumer()
@@ -255,9 +255,10 @@ func (a *App) handleData(w http.ResponseWriter, r *http.Request) {
 		recentMsgs = []string{}
 	}
 
-	rabbitMsgs := []string{}
-	if a.rabbitClient != nil {
-		rabbitMsgs = a.rabbitClient.GetRecentMessages()
+	rabbitMsgs, err := a.rdb.LRange(r.Context(), "rabbit_messages", 0, 9).Result()
+	if err != nil {
+		log.Printf("Redis read error (rabbit_messages): %v", err)
+		rabbitMsgs = []string{}
 	}
 
 	writeJSON(w, map[string]any{
@@ -298,7 +299,7 @@ func main() {
 	defer kafkaWriter.Close()
 	startKafkaConsumer([]string{cfg.KafkaBroker}, cfg.KafkaTopic, rdb)
 
-	rabbitClient := connectRabbitWithRetry(10, 3*time.Second)
+	rabbitClient := connectRabbitWithRetry(rdb, 10, 3*time.Second)
 	if rabbitClient != nil {
 		defer rabbitClient.Close()
 	}
